@@ -11,7 +11,24 @@ include tools/config.mk
 WOLFBOOT_ROOT?=$(PWD)
 CFLAGS:=-D__WOLFBOOT -DWOLFBOOT_VERSION=$(WOLFBOOT_VERSION)UL -ffunction-sections -fdata-sections
 LSCRIPT:=config/target.ld
-LDFLAGS:=-T $(LSCRIPT) -Wl,-gc-sections -Wl,-Map=wolfboot.map -ffreestanding -nostartfiles
+LSCRIPT_FLAGS:=
+LDFLAGS:=
+SECURE_LDFLAGS:=
+LD_START_GROUP:=-Wl,--start-group
+LD_END_GROUP:=-Wl,--end-group
+LSCRIPT_IN:=hal/$(TARGET).ld
+V?=0
+DEBUG?=1
+DEBUG_UART?=1
+LIBS=
+SIGN_ALG=
+OBJCOPY_FLAGS=
+BIG_ENDIAN?=0
+USE_GCC?=1
+USE_GCC_HEADLESS?=1
+FLASH_OTP_KEYSTORE?=0
+BOOTLOADER_PARTITION_SIZE?=$$(( $(WOLFBOOT_PARTITION_BOOT_ADDRESS) - $(ARCH_FLASH_OFFSET)))
+
 OBJS:= \
 ./hal/$(TARGET).o \
 ./src/loader.o \
@@ -98,7 +115,39 @@ test-app/image_v1_signed.bin: test-app/image.bin
 	@echo "\t[SIGN] $(BOOT_IMG)"
 	$(Q)$(SIGN_TOOL) $(SIGN_OPTIONS) $(BOOT_IMG) $(PRIVATE_KEY) 1
 
-factory.bin: $(BOOT_IMG) wolfboot-align.bin $(PRIVATE_KEY) test-app/image_v1_signed.bin
+	$(Q)(test $(SIGN) = NONE) || $(SIGN_ENV) $(SIGN_TOOL) $(SIGN_OPTIONS) \
+		$(SECONDARY_SIGN_OPTIONS) $(BOOT_IMG) $(PRIVATE_KEY) \
+		$(SECONDARY_PRIVATE_KEY) 1 || true
+	$(Q)(test $(SIGN) = NONE) && $(SIGN_ENV) $(SIGN_TOOL) $(SIGN_OPTIONS) $(BOOT_IMG) 1 || true
+
+test-app/image_v2_signed.bin: $(BOOT_IMG)
+	$(Q)(test $(SIGN) = NONE) || $(SIGN_ENV) $(SIGN_TOOL) $(SIGN_OPTIONS) \
+		$(SECONDARY_SIGN_OPTIONS) $(BOOT_IMG) $(PRIVATE_KEY) \
+		$(SECONDARY_PRIVATE_KEY) 2 || true
+	$(Q)(test $(SIGN) = NONE) && $(SIGN_ENV) $(SIGN_TOOL) $(SIGN_OPTIONS) \
+		$(BOOT_IMG) 2  || true
+
+test-app/image.elf: wolfboot.elf
+	$(Q)$(MAKE) -C test-app WOLFBOOT_ROOT="$(WOLFBOOT_ROOT)" image.elf
+	$(Q)$(SIZE) test-app/image.elf
+
+ifeq ($(ELF_FLASH_SCATTER),1)
+test-app/image.elf: squashelf
+endif
+
+assemble_internal_flash.dd: FORCE
+	$(Q)$(BINASSEMBLE) internal_flash.dd \
+		0 wolfboot.bin \
+		$$(($(WOLFBOOT_PARTITION_BOOT_ADDRESS) - $(ARCH_FLASH_OFFSET))) test-app/image_v1_signed.bin \
+		$$(($(WOLFBOOT_PARTITION_UPDATE_ADDRESS)-$(ARCH_FLASH_OFFSET))) /tmp/swap \
+		$$(($(WOLFBOOT_PARTITION_SWAP_ADDRESS)-$(ARCH_FLASH_OFFSET))) /tmp/swap
+
+internal_flash.dd: $(BINASSEMBLE) wolfboot.bin $(BOOT_IMG) $(PRIVATE_KEY) test-app/image_v1_signed.bin
+	@echo "\t[MERGE] internal_flash.dd"
+	$(Q)dd if=/dev/zero bs=1 count=$$(($(WOLFBOOT_SECTOR_SIZE))) > /tmp/swap
+	make assemble_internal_flash.dd
+
+factory.bin: $(BINASSEMBLE) wolfboot.bin $(BOOT_IMG) $(PRIVATE_KEY) test-app/image_v1_signed.bin
 	@echo "\t[MERGE] $@"
 	$(Q)cat wolfboot-align.bin test-app/image_v1_signed.bin > $@
 
