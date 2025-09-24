@@ -423,4 +423,14 @@ void uart_printf(const char* fmt, ...)
     uart_vprintf(fmt, argp);
     va_end(argp);
 }
+
+int uart_tx(uint8_t c);  // provided by your STM32L0 UART driver
+
+void uart_write(const char* buf, unsigned int sz)
+{
+    for (unsigned int i = 0; i < sz; i++) {
+        uart_tx((uint8_t)buf[i]);
+    }
+}
+
 #endif /* PRINTF_ENABLED && DEBUG_UART */

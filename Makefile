@@ -19,8 +19,8 @@ LD_START_GROUP:=-Wl,--start-group
 LD_END_GROUP:=-Wl,--end-group
 LSCRIPT_IN:=hal/$(TARGET).ld
 V?=0
-DEBUG?=0
-DEBUG_UART?=0
+DEBUG?=1
+DEBUG_UART?=1
 LIBS=
 SIGN_ALG=
 OBJCOPY_FLAGS=
@@ -269,6 +269,13 @@ test-app/image_v1_signed.bin: $(BOOT_IMG)
 		$(SECONDARY_SIGN_OPTIONS) $(BOOT_IMG) $(PRIVATE_KEY) \
 		$(SECONDARY_PRIVATE_KEY) 1 || true
 	$(Q)(test $(SIGN) = NONE) && $(SIGN_ENV) $(SIGN_TOOL) $(SIGN_OPTIONS) $(BOOT_IMG) 1 || true
+
+test-app/image_v2_signed.bin: $(BOOT_IMG)
+	$(Q)(test $(SIGN) = NONE) || $(SIGN_ENV) $(SIGN_TOOL) $(SIGN_OPTIONS) \
+		$(SECONDARY_SIGN_OPTIONS) $(BOOT_IMG) $(PRIVATE_KEY) \
+		$(SECONDARY_PRIVATE_KEY) 2 || true
+	$(Q)(test $(SIGN) = NONE) && $(SIGN_ENV) $(SIGN_TOOL) $(SIGN_OPTIONS) \
+		$(BOOT_IMG) 2  || true
 
 test-app/image.elf: wolfboot.elf
 	$(Q)$(MAKE) -C test-app WOLFBOOT_ROOT="$(WOLFBOOT_ROOT)" image.elf

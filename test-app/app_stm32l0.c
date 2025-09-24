@@ -21,7 +21,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335, USA
  */
 
-#include <stdlib.h>
+ #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include "led.h"
@@ -103,115 +103,156 @@ static void uart2_pins_setup(void)
 
 }
 
-int uart_setup(uint32_t bitrate)
-{
-    uint32_t reg;
+// int uart_setup(uint32_t bitrate)
+// {
+//     uint32_t reg;
 
-    /* Enable pins and configure for AF */
-    uart2_pins_setup();
+//     /* Enable pins and configure for AF */
+//     uart2_pins_setup();
 
-    /* Turn on the device */
-    APB1_CLOCK_ER |= UART2_APB1_CLOCK_ER_VAL;
+//     /* Turn on the device */
+//     APB1_CLOCK_ER |= UART2_APB1_CLOCK_ER_VAL;
 
-    /* Enable 16-bit oversampling */
-    UART2_CR1 &= (~UART_CR1_OVER8);
+//     /* Enable 16-bit oversampling */
+//     UART2_CR1 &= (~UART_CR1_OVER8);
 
-    /* Configure clock */
-    UART2_BRR |= (uint16_t)(CLOCK_SPEED / bitrate);
+//     /* Configure clock */
+//     UART2_BRR |= (uint16_t)(CLOCK_SPEED / bitrate);
 
-    /* Configure data bits to 8 */
-    UART2_CR1 &= ~UART_CR1_SYMBOL_LEN;
+//     /* Configure data bits to 8 */
+//     UART2_CR1 &= ~UART_CR1_SYMBOL_LEN;
 
-    /* Disable parity */
-    UART2_CR1 &= ~(UART_CR1_PARITY_ENABLED | UART_CR1_PARITY_ODD);
+//     /* Disable parity */
+//     UART2_CR1 &= ~(UART_CR1_PARITY_ENABLED | UART_CR1_PARITY_ODD);
 
-    /* Set stop bits */
-    UART2_CR2 = UART2_CR2 & ~UART_CR2_STOPBITS;
+//     /* Set stop bits */
+//     UART2_CR2 = UART2_CR2 & ~UART_CR2_STOPBITS;
 
-    /* Clear flags for async mode */
-    UART2_CR2 &= ~(UART_CR2_LINEN | UART_CR2_CLKEN);
-    UART2_CR3 &= ~(UART_CR3_SCEN | UART_CR3_HDSEL | UART_CR3_IREN);
+//     /* Clear flags for async mode */
+//     UART2_CR2 &= ~(UART_CR2_LINEN | UART_CR2_CLKEN);
+//     UART2_CR3 &= ~(UART_CR3_SCEN | UART_CR3_HDSEL | UART_CR3_IREN);
 
-    /* Configure for RX+TX, turn on. */
-    UART2_CR1 |= UART_CR1_TX_ENABLE | UART_CR1_RX_ENABLE | UART_CR1_UART_ENABLE;
+//     /* Configure for RX+TX, turn on. */
+//     UART2_CR1 |= UART_CR1_TX_ENABLE | UART_CR1_RX_ENABLE | UART_CR1_UART_ENABLE;
 
-    return 0;
+//     return 0;
+// }
+
+extern int uart_init(uint32_t bitrate, uint8_t data, char parity, uint8_t stop);
+extern int uart_tx(uint8_t c);
+
+static inline void uart_write(const char* buf, int len) {
+    for (int i = 0; i < len; i++) uart_tx((uint8_t)buf[i]);
 }
 
-int uart_write(const uint8_t c)
-{
-    volatile uint32_t reg;
-    do {
-        reg = UART2_ISR;
-    } while ((reg & UART_ISR_TX_EMPTY) == 0);
-    UART2_TDR = c;
-    return 1;
-}
-
-int uart_read(uint8_t *c, int len)
-{
-    volatile uint32_t reg;
-    int i = 0;
-    reg = UART2_ISR;
-    if (reg & UART_ISR_RX_NOTEMPTY) {
-        *c = (uint8_t)UART2_RDR;
-        return 1;
-    }
-    return 0;
-}
+// int uart_read(uint8_t *c, int len)
+// {
+//     volatile uint32_t reg;
+//     int i = 0;
+//     reg = UART2_ISR;
+//     if (reg & UART_ISR_RX_NOTEMPTY) {
+//         *c = (uint8_t)UART2_RDR;
+//         return 1;
+//     }
+//     return 0;
+// }
 
 void uart_print(const char *s)
 {
-    int i = 0;
-    while (s[i]) {
-        uart_write(s[i++]);
-    }
+    uart_write(s, strlen(s));  // <-- pass pointer + length
 }
 
-/* Matches all keys:
- *    - chacha (32 + 12)
- *    - aes128 (16 + 16)
- *    - aes256 (32 + 16)
- */
+static void uart_print_u32(uint32_t v) {    // print unsigned in decimal
+    char buf[11];                            // 10 digits + NUL
+    int i = 10;
+    buf[i] = '\0';
+    do {
+        buf[--i] = (char)('0' + (v % 10u));
+        v /= 10u;
+    } while (v && i > 0);
+    uart_print(&buf[i]);
+}
+
+static void uart_print_hex_u32(uint32_t v) { // optional hex helper
+    const char hexd[] = "0123456789ABCDEF";
+    char buf[10] = "0x00000000";
+    for (int i = 9; i >= 2; --i) { buf[i] = hexd[v & 0xF]; v >>= 4; }
+    uart_print(buf);
+}
+
+/* ---------- Tiny delay (no SysTick / CMSIS needed) ---------- */
+static void delay_cycles(uint32_t n) { while (n--) __asm__ volatile ("nop"); }
+
+/* Very rough ~1ms using CPU busy-wait (tune divider if needed) */
+static void delay_ms(uint32_t ms)
+{
+    /* Divider 3000 -> ~8 cycles per loop body * 3000 ≈ 24k cycles ~ 1 ms @ 24 MHz */
+    const uint32_t per_ms = CLOCK_SPEED / 8000u;
+    for (uint32_t i = 0; i < ms; i++) delay_cycles(per_ms);
+}
+
 /* Longest key possible: AES256 (32 key + 16 IV = 48) */
 char enc_key[] = "0123456789abcdef0123456789abcdef"
-		 "0123456789abcdef";
+                 "0123456789abcdef";
 
 void main(void)
 {
     uint32_t version;
-    volatile uint32_t i, j;
+    uint32_t update_version;
 
-    uart_setup(115200);
+    /* Bring up UART first so early logs are visible */
+    // uart_setup(115200);
+    uart_init(115200, 8, 'N', 1);
     uart_print("STM32L0 Test Application\n\r");
 
-#ifdef SPI_FLASH
-    spi_flash_probe();
-#endif
-    version = wolfBoot_current_firmware_version();
+    version        = wolfBoot_current_firmware_version();
+    update_version = wolfBoot_update_firmware_version();
+    // update_version = 2;
 
-    if ((version % 2) == 1) {
-        uint32_t sz;
-#if EXT_ENCRYPTED
-        wolfBoot_set_encrypt_key((uint8_t *)enc_key,(uint8_t *)(enc_key +  32));
-#endif
+    uart_print("curr ver = ");   uart_print_u32(version);        uart_print("\r\n");
+    uart_print("update ver = "); uart_print_u32(update_version); uart_print("\r\n");
+
+    uart_print("upd type = ");  uart_print_u32(wolfBoot_get_image_type(PART_UPDATE)); uart_print("\r\n");
+    uint8_t st=0xFF;
+    if (wolfBoot_get_partition_state(PART_UPDATE, &st) == 0) {
+        uart_print("upd state = "); uart_print_u32(st); uart_print("\r\n");
+    }
+
+    uint32_t wolfBoot_get_blob_version(uint8_t *blob);
+    uint32_t direct_update_v = wolfBoot_get_blob_version((void*)WOLFBOOT_PARTITION_UPDATE_ADDRESS + ARCH_FLASH_OFFSET);
+    uart_print("direct update ver = "); uart_print_u32(direct_update_v); uart_print("\r\n");
+
+    /* Avoid divide-by-zero; blink at least once/sec */
+    if (version == 0u) version = 5u;
+
+    if (direct_update_v > version) {
+// #if EXT_ENCRYPTED
+//         wolfBoot_set_encrypt_key((uint8_t *)enc_key, (uint8_t *)(enc_key + 32));
+// #endif
+        version = direct_update_v;
+        uart_print("update available -> triggering swap\r\n");
         wolfBoot_update_trigger();
     } else {
         wolfBoot_success();
     }
 
-    for (i = 0; i < version; i++) {
-        boot_led_on();
-        for (j = 0; j < 200000; j++)
-                ;
-        boot_led_off();
-        for (j = 0; j < 200000; j++)
-                ;
+    /* Blink 'version' times per second indefinitely */
+    while (1) {
+        uint32_t blinks_per_second = version;
+        uint32_t cycle_ms = 1000u / blinks_per_second;  /* full on+off time */
+        uint32_t half_ms  = cycle_ms / 2u;              /* on or off time   */
+
+        for (uint32_t i = 0; i < blinks_per_second; i++) {
+            boot_led_on();
+            delay_ms(half_ms);
+            boot_led_off();
+            delay_ms(half_ms);
+        }
+
+        /* Keep period at ~1s, burn remainder if needed */
+        uint32_t spent = (cycle_ms * blinks_per_second);
+        if (spent < 1000u) delay_ms(1000u - spent);
     }
-    boot_led_on();
-    /* Wait for reboot */
-    while(1)
-        ;
 }
 
-#endif /** PLATFROM_stm32l0 **/
+#endif /* TARGET_stm32l0 */
