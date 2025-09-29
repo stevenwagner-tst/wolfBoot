@@ -30,6 +30,7 @@
 #include "wolfboot/wolfboot.h"
 #include "target.h"
 
+#include "menu.h"
 #include "delta.h"
 #include "printf.h"
 #ifdef WOLFBOOT_TPM
@@ -61,9 +62,11 @@ static uint8_t buffer[FLASHBUFFER_SIZE] XALIGNED(4);
 
 static void RAMFUNCTION wolfBoot_erase_bootloader(void)
 {
-    uint32_t len = WOLFBOOT_PARTITION_BOOT_ADDRESS - ARCH_FLASH_OFFSET;
-    hal_flash_erase(ARCH_FLASH_OFFSET, len);
+    uintptr_t flash_base = (uintptr_t)TO_ABS_ADDR(0); /* absolute base of flash */
+    uintptr_t boot_abs   = (uintptr_t)TO_ABS_ADDR(WOLFBOOT_PARTITION_BOOT_ADDRESS);
 
+    uint32_t len = (uint32_t)(boot_abs - flash_base);
+    hal_flash_erase(flash_base, len);
 }
 
 #include <string.h>
@@ -1062,6 +1065,37 @@ int wolfBoot_unlock_disk(void)
 }
 #endif
 
+extern volatile slot_choice_t g_menu_choice;   // defined in loader.c
+
+static int verify_image_ok(uint8_t part) {
+    struct wolfBoot_image img;
+    wolfBoot_printf("\r\nVerifying Valid image...");
+    if (wolfBoot_open_image(&img, part) != 0) 
+    {
+        wolfBoot_printf("Failed.");
+        return -1;
+    } else {
+        wolfBoot_printf("Passed!\r\n");
+    }
+    wolfBoot_printf("Verifying Image Integrity via hash...");
+    if (wolfBoot_verify_integrity(&img) != 0) 
+    {
+        wolfBoot_printf("Failed.");
+        return -1;
+    } else {
+        wolfBoot_printf("Passed!\r\n");
+    }
+    wolfBoot_printf("Verifying Valid Image Signature...");
+    if (wolfBoot_verify_authenticity(&img) != 0)
+    {
+        wolfBoot_printf("Failed.");
+        return -1;
+    } else {
+        wolfBoot_printf("Passed!\r\n");
+    }
+    return 0;
+}
+
 void RAMFUNCTION wolfBoot_start(void)
 {
     int bootRet;
@@ -1072,7 +1106,57 @@ void RAMFUNCTION wolfBoot_start(void)
     uint8_t bootState;
     uint8_t updateState;
     struct wolfBoot_image boot;
+    /* ====== MENU OVERRIDE (runs before normal policy) ====== */
 
+    if (g_menu_choice == SLOT_B) {
+
+        /* Verify SLOT_B image before booting */
+        if (verify_image_ok(PART_UPDATE) == 0) {
+            wolfBoot_printf("Image in Slot B is valid. Booting...\n");
+
+            /* Auto-persist this as the new default */
+            persist_preferred_slot(SLOT_B);
+
+            struct wolfBoot_image imgB;
+            if (wolfBoot_open_image(&imgB, PART_UPDATE) == 0) {
+                hal_prepare_boot();                 /* sets VTOR, disables IRQs */
+                do_boot((void *)imgB.fw_base);      /* jump to Slot B */
+            }
+            wolfBoot_printf("ERROR: Failed to open Slot B image after verify.\n");
+            wolfBoot_panic();
+        } else {
+            wolfBoot_printf("Slot B image invalid, staying on Slot A.\n");
+            g_menu_choice = SLOT_A;  /* fall back */
+        }
+
+    } else if (g_menu_choice == SLOT_A) {
+
+        /* Verify SLOT_A image before booting */
+        if (verify_image_ok(PART_BOOT) == 0) {
+            wolfBoot_printf("Image in Slot A is valid. Booting...\n");
+
+            /* Auto-persist this as the new default */
+            persist_preferred_slot(SLOT_A);
+
+            /* Normal boot flow will continue to Slot A */
+        } else {
+            wolfBoot_printf("Slot A image invalid, trying Slot B instead...\n");
+
+            /* Try to boot B if available */
+            if (verify_image_ok(PART_UPDATE) == 0) {
+                struct wolfBoot_image imgB;
+                if (wolfBoot_open_image(&imgB, PART_UPDATE) == 0) {
+                    persist_preferred_slot(SLOT_B);
+                    hal_prepare_boot();
+                    do_boot((void *)imgB.fw_base);
+                }
+            }
+            wolfBoot_printf("Both slots invalid — panic!\n");
+            wolfBoot_panic();
+        }
+    }
+
+    /* ====== END MENU OVERRIDE ====== */
 #if defined(ARCH_SIM) && defined(WOLFBOOT_TPM) && defined(WOLFBOOT_TPM_SEAL)
     wolfBoot_unlock_disk();
 #endif
@@ -1122,8 +1206,8 @@ void RAMFUNCTION wolfBoot_start(void)
     }
 
     bootRet = wolfBoot_open_image(&boot, PART_BOOT);
-    wolfBoot_printf("Booting version: 0x%x\n",
-        wolfBoot_get_blob_version(boot.hdr));
+    // wolfBoot_printf("Booting version: 0x%x\n",
+    //     wolfBoot_get_blob_version(boot.hdr));
 
     if (bootRet < 0
             || (wolfBoot_verify_integrity(&boot) < 0)

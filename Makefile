@@ -13,7 +13,7 @@ CFLAGS:=-D"__WOLFBOOT"
 CFLAGS+=-Werror -Wextra -Wno-array-bounds
 LSCRIPT:=config/target.ld
 LSCRIPT_FLAGS:=
-LDFLAGS:=
+LDFLAGS :=
 SECURE_LDFLAGS:=
 LD_START_GROUP:=-Wl,--start-group
 LD_END_GROUP:=-Wl,--end-group
@@ -34,7 +34,15 @@ OBJS:= \
 	./src/string.o \
 	./src/image.o \
 	./src/libwolfboot.o \
-	./hal/hal.o
+	./hal/hal.o \
+	./src/menu_stm32l0.o
+
+ifneq ($(filter 1,$(DEBUG_UART) $(UART_FLASH)),)
+  OBJS += src/uart_flash.o
+  OBJS += hal/uart/uart_drv_$(UART_TARGET).o
+  CFLAGS += -DUART_FLASH=$(UART_FLASH)
+  CFLAGS += -DUART_TARGET=$(UART_TARGET)
+endif
 
 ifneq ($(TARGET),library)
 	OBJS+=./hal/$(TARGET).o
@@ -276,6 +284,13 @@ test-app/image_v2_signed.bin: $(BOOT_IMG)
 		$(SECONDARY_PRIVATE_KEY) 2 || true
 	$(Q)(test $(SIGN) = NONE) && $(SIGN_ENV) $(SIGN_TOOL) $(SIGN_OPTIONS) \
 		$(BOOT_IMG) 2  || true
+
+test-app/image_v3_signed.bin: $(BOOT_IMG)
+	$(Q)(test $(SIGN) = NONE) || $(SIGN_ENV) $(SIGN_TOOL) $(SIGN_OPTIONS) \
+		$(SECONDARY_SIGN_OPTIONS) $(BOOT_IMG) $(PRIVATE_KEY) \
+		$(SECONDARY_PRIVATE_KEY) 3 || true
+	$(Q)(test $(SIGN) = NONE) && $(SIGN_ENV) $(SIGN_TOOL) $(SIGN_OPTIONS) \
+		$(BOOT_IMG) 3  || true
 
 test-app/image.elf: wolfboot.elf
 	$(Q)$(MAKE) -C test-app WOLFBOOT_ROOT="$(WOLFBOOT_ROOT)" image.elf

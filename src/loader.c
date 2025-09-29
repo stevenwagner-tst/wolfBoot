@@ -37,6 +37,7 @@
 #include "uart_flash.h"
 #endif
 #include "wolfboot/wolfboot.h"
+#include "menu.h"
 
 #ifdef WOLFBOOT_TPM
 #include "tpm.h"
@@ -102,6 +103,8 @@ int main(void)
 #endif
 
     hal_init();
+    wolfBoot_printf("\r\nwolfBoot starting...\r\n");
+
 #ifdef TEST_FLASH
     hal_flash_test();
 #endif
@@ -117,18 +120,23 @@ int main(void)
     spi_flash_probe();
 #ifdef UART_FLASH
     uart_init(UART_FLASH_BITRATE, 8, 'N', 1);
+    // wolfBoot_printf("UART flash server ready @ %d\n", UART_FLASH_BITRATE);
     uart_send_current_version();
 #endif
+
+g_menu_choice = menu_preboot_run();
+
 #ifdef WOLFBOOT_TPM
     wolfBoot_tpm2_init();
 #endif
 #ifdef WOLFCRYPT_SECURE_MODE
     wcs_Init();
 #endif
+    wolfBoot_printf("\r\nWolfBoot Bootloader starting...\r\n");
     wolfBoot_start();
 
-
     /* wolfBoot_start should never return. */
+    wolfBoot_printf("wolfBoot_start returned! Panic.\n");
     wolfBoot_panic();
 
     return 0;

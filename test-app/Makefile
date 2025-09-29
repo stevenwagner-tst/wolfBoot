@@ -59,7 +59,7 @@ else
     LDFLAGS+=-ffreestanding -nostartfiles
     CFLAGS+=-DWOLFBOOT_RENESAS_APP
   else
-    APP_OBJS:=app_$(TARGET).o led.o system.o timer.o ../test-app/libwolfboot.o
+    APP_OBJS:=app_$(TARGET).o led.o system.o timer.o syscalls.o ../test-app/libwolfboot.o
   endif
 endif
 

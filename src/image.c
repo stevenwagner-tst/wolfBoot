@@ -52,6 +52,20 @@
 #include <wolfssl/wolfcrypt/sha3.h>
 #endif
 
+#ifndef PART_ADDR_ABSOLUTE
+#define PART_ADDR_ABSOLUTE 0
+#endif
+
+#if PART_ADDR_ABSOLUTE
+  #define TO_ABS_ADDR(off) ((uint8_t*)(uintptr_t)(off))
+#else
+  /* ARCH_FLASH_OFFSET must be set to the mem-mapped base, e.g. 0x08000000 */
+  #ifndef ARCH_FLASH_OFFSET
+  #error "ARCH_FLASH_OFFSET must be defined when PART_ADDR_ABSOLUTE=0"
+  #endif
+  #define TO_ABS_ADDR(off) ((uint8_t*)((uintptr_t)(off) + (uintptr_t)ARCH_FLASH_OFFSET))
+#endif
+
 /* Globals */
 static uint8_t digest[WOLFBOOT_SHA_DIGEST_SIZE] XALIGNED(4);
 
@@ -1243,8 +1257,24 @@ int wolfBoot_open_image_address(struct wolfBoot_image *img, uint8_t *image)
 {
     uint32_t *magic = (uint32_t *)(image);
     if (*magic != WOLFBOOT_MAGIC) {
+    #ifndef WOLFBOOT_QUIET_IMAGE_LOG
         wolfBoot_printf("Boot header magic 0x%08x invalid at %p\n",
             (unsigned int)*magic, image);
+    #endif
+        uint32_t m = *magic;
+
+        /* Optional: quick hexdump of first 16 bytes */
+        const uint8_t *b = (const uint8_t*)image;
+        wolfBoot_printf("open_image_addr: part=%d is_ext=%d image=%p\n",
+                        img ? img->part : -1, img ? PART_IS_EXT(img) : -1, image);
+        wolfBoot_printf("Boot header magic 0x%08x invalid at %p\n",
+                        (unsigned int)m, image);
+        wolfBoot_printf("Expected WOLFBOOT_MAGIC = 0x%08x\n",
+                        (unsigned int)WOLFBOOT_MAGIC);
+        wolfBoot_printf("First 16 bytes @image: %02X %02X %02X %02X  %02X %02X %02X %02X  "
+                        "%02X %02X %02X %02X  %02X %02X %02X %02X\n",
+                        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
         return -1;
     }
     img->fw_size = wolfBoot_image_size(image);
@@ -1255,6 +1285,7 @@ int wolfBoot_open_image_address(struct wolfBoot_image *img, uint8_t *image)
             (unsigned int)img->fw_size,
             (WOLFBOOT_PARTITION_SIZE - IMAGE_HEADER_SIZE));
         img->fw_size = WOLFBOOT_PARTITION_SIZE - IMAGE_HEADER_SIZE;
+        wolfBoot_printf("Failing at checkpoint 5\n");
         return -1;
     }
     if (!img->hdr_ok) {
@@ -1271,13 +1302,13 @@ int wolfBoot_open_image_address(struct wolfBoot_image *img, uint8_t *image)
 #ifdef EXT_FLASH
     img->hdr_cache = image;
 #endif
-
+    #ifndef WOLFBOOT_QUIET_IMAGE_LOG
     wolfBoot_printf("%s partition: %p (sz %d, ver 0x%x, type 0x%x)\n",
         (img->part == PART_BOOT) ? "Boot" : "Update",
         img->hdr, (unsigned int)img->fw_size,
         wolfBoot_get_blob_version(image),
         wolfBoot_get_blob_type(image));
-
+    #endif
     return 0;
 }
 
@@ -1321,8 +1352,10 @@ int wolfBoot_open_image(struct wolfBoot_image *img, uint8_t part)
     int ret;
 #endif
     uint8_t *image;
-    if (!img)
+    if (!img) {
+        wolfBoot_printf("Failing at checkpoint 1");
         return -1;
+    }
 
 #ifdef EXT_FLASH
     hdr_cpy_done = 0; /* reset hdr "open" flag */
@@ -1344,13 +1377,17 @@ int wolfBoot_open_image(struct wolfBoot_image *img, uint8_t part)
             (void*)WOLFBOOT_DTS_UPDATE_ADDRESS;
         wolfBoot_printf("%s partition: %p\n",
             (part == PART_DTS_BOOT) ? "DTB boot" : "DTB update", img->hdr);
-        if (PART_IS_EXT(img))
+        if (PART_IS_EXT(img)) {
+            wolfBoot_printf("PART is external??");
             image = fetch_hdr_cpy(img);
+        }
         else
             image = (uint8_t*)img->hdr;
         ret = wolfBoot_get_dts_size(image);
-        if (ret < 0)
+        if (ret < 0) {
+            wolfBoot_printf("Failing at checkpoint 3");
             return -1;
+        }
         img->hdr_ok = 1;
         img->fw_base = img->hdr;
         img->fw_size = (uint32_t)ret;
@@ -1358,12 +1395,13 @@ int wolfBoot_open_image(struct wolfBoot_image *img, uint8_t part)
     }
 #endif
     if (part == PART_BOOT) {
-        img->hdr = (void*)WOLFBOOT_PARTITION_BOOT_ADDRESS;
+        img->hdr = (void*)TO_ABS_ADDR(WOLFBOOT_PARTITION_BOOT_ADDRESS);
     }
     else if (part == PART_UPDATE) {
-        img->hdr = (void*)WOLFBOOT_PARTITION_UPDATE_ADDRESS;
+        img->hdr = (void*)TO_ABS_ADDR(WOLFBOOT_PARTITION_UPDATE_ADDRESS);
     }
     else {
+        wolfBoot_printf("Failing at checkpoint 2");
         return -1;
     }
 

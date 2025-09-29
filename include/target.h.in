@@ -45,6 +45,22 @@
     #define WOLFBOOT_PART_USE_ARCH_OFFSET
 #endif
 
+#ifndef PART_ADDR_ABSOLUTE
+#define PART_ADDR_ABSOLUTE 0      /* 0 = partition constants are offsets; 1 = absolute */
+#endif
+
+#ifndef ARCH_FLASH_OFFSET
+#define ARCH_FLASH_OFFSET 0x08000000u
+#endif
+
+#if PART_ADDR_ABSOLUTE
+  /* Partition constants (e.g., WOLFBOOT_PARTITION_UPDATE_ADDRESS) are already absolute */
+  #define TO_ABS_ADDR(off) ((uint8_t*)(uintptr_t)(off))
+#else
+  /* Partition constants are offsets; convert to absolute using flash base */
+  #define TO_ABS_ADDR(off) ((uint8_t*)((uintptr_t)(off) + (uintptr_t)ARCH_FLASH_OFFSET))
+#endif
+
 #ifdef PULL_LINKER_DEFINES
     #include <stdint.h>
 

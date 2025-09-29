@@ -126,7 +126,6 @@ tools/squashelf/**
 !tools/squashelf/README.md
 
 # Generated configuration files
-.config
 .vs
 *.filters
 *.user

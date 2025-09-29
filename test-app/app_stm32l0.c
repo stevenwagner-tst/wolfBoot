@@ -21,15 +21,11 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335, USA
  */
 
-#include <stdlib.h>
 #include <stdint.h>
-#include <string.h>
 #include "led.h"
 #include "target.h"
+#include "image.h"
 #include "wolfboot/wolfboot.h"
-#ifdef SPI_FLASH
-#include "spi_flash.h"
-#endif
 
 #ifdef TARGET_stm32l0
 
@@ -85,6 +81,16 @@
 #define CLOCK_SPEED (24000000)
 #endif
 
+/* Cortex-M0+ VTOR register */
+static inline uint32_t get_vtor(void) {
+    return *(volatile uint32_t*)0xE000ED08u;
+}
+
+/* Running image header is immediately before the vector table */
+static inline uint8_t* running_hdr_ptr(void) {
+    return (uint8_t*)(get_vtor() - IMAGE_HEADER_SIZE);
+}
+
 static void uart2_pins_setup(void)
 {
     uint32_t reg;
@@ -103,40 +109,16 @@ static void uart2_pins_setup(void)
 
 }
 
-// int uart_setup(uint32_t bitrate)
-// {
-//     uint32_t reg;
+static uint32_t running_firmware_version(void) {
+    return wolfBoot_get_blob_version(running_hdr_ptr());
+}
 
-//     /* Enable pins and configure for AF */
-//     uart2_pins_setup();
-
-//     /* Turn on the device */
-//     APB1_CLOCK_ER |= UART2_APB1_CLOCK_ER_VAL;
-
-//     /* Enable 16-bit oversampling */
-//     UART2_CR1 &= (~UART_CR1_OVER8);
-
-//     /* Configure clock */
-//     UART2_BRR |= (uint16_t)(CLOCK_SPEED / bitrate);
-
-//     /* Configure data bits to 8 */
-//     UART2_CR1 &= ~UART_CR1_SYMBOL_LEN;
-
-//     /* Disable parity */
-//     UART2_CR1 &= ~(UART_CR1_PARITY_ENABLED | UART_CR1_PARITY_ODD);
-
-//     /* Set stop bits */
-//     UART2_CR2 = UART2_CR2 & ~UART_CR2_STOPBITS;
-
-//     /* Clear flags for async mode */
-//     UART2_CR2 &= ~(UART_CR2_LINEN | UART_CR2_CLKEN);
-//     UART2_CR3 &= ~(UART_CR3_SCEN | UART_CR3_HDSEL | UART_CR3_IREN);
-
-//     /* Configure for RX+TX, turn on. */
-//     UART2_CR1 |= UART_CR1_TX_ENABLE | UART_CR1_RX_ENABLE | UART_CR1_UART_ENABLE;
-
-//     return 0;
-// }
+static int running_is_slot_b(void) {
+    /* Slot B VTOR is slot B header + IMAGE_HEADER_SIZE */
+    uintptr_t slotB_vtor =
+        (uintptr_t)TO_ABS_ADDR(WOLFBOOT_PARTITION_UPDATE_ADDRESS) + IMAGE_HEADER_SIZE;
+    return get_vtor() == slotB_vtor;
+}
 
 extern int uart_init(uint32_t bitrate, uint8_t data, char parity, uint8_t stop);
 extern int uart_tx(uint8_t c);
@@ -157,9 +139,15 @@ static inline void uart_write(const char* buf, int len) {
 //     return 0;
 // }
 
+static inline int my_strlen(const char* s) {
+    int n = 0;
+    while (s[n] != '\0') n++;
+    return n;
+}
+
 void uart_print(const char *s)
 {
-    uart_write(s, strlen(s));  // <-- pass pointer + length
+    uart_write(s, my_strlen(s));
 }
 
 static void uart_print_u32(uint32_t v) {    // print unsigned in decimal
@@ -203,42 +191,26 @@ void main(void)
     /* Bring up UART first so early logs are visible */
     // uart_setup(115200);
     uart_init(115200, 8, 'N', 1);
-    uart_print("STM32L0 Test Application\n\r");
+    uart_print("\n\rSTM32L0 Test Application\n\r");
 
-    version        = wolfBoot_current_firmware_version();
-    update_version = wolfBoot_update_firmware_version();
-    // update_version = 2;
+    uint32_t boot_ver   = wolfBoot_current_firmware_version();  // Slot A (BOOT)
+    uint32_t update_ver = wolfBoot_update_firmware_version();   // Slot B (UPDATE)
+    uint32_t run_ver    = running_firmware_version();           // what’s actually running
 
-    uart_print("curr ver = ");   uart_print_u32(version);        uart_print("\r\n");
-    uart_print("update ver = "); uart_print_u32(update_version); uart_print("\r\n");
+    uart_print("Partition A version = ");   uart_print_u32(boot_ver);   uart_print("\r\n");
+    uart_print("Partition B version = "); uart_print_u32(update_ver); uart_print("\r\n");
+    uart_print("Firmware is Currently Running Version = ");   uart_print_u32(run_ver);    uart_print("\r\n");
 
-    uart_print("upd type = ");  uart_print_u32(wolfBoot_get_image_type(PART_UPDATE)); uart_print("\r\n");
-    uint8_t st=0xFF;
-    if (wolfBoot_get_partition_state(PART_UPDATE, &st) == 0) {
-        uart_print("upd state = "); uart_print_u32(st); uart_print("\r\n");
-    }
+    uint32_t blinks_per_second = run_ver ? run_ver : 1;
 
-    uint32_t wolfBoot_get_blob_version(uint8_t *blob);
-    uint32_t direct_update_v = wolfBoot_get_blob_version((void*)WOLFBOOT_PARTITION_UPDATE_ADDRESS + ARCH_FLASH_OFFSET);
-    uart_print("direct update ver = "); uart_print_u32(direct_update_v); uart_print("\r\n");
-
-    /* Avoid divide-by-zero; blink at least once/sec */
-    if (version == 0u) version = 5u;
-
-    if (direct_update_v > version) {
 // #if EXT_ENCRYPTED
 //         wolfBoot_set_encrypt_key((uint8_t *)enc_key, (uint8_t *)(enc_key + 32));
 // #endif
-        version = direct_update_v;
-        uart_print("update available -> triggering swap\r\n");
-        wolfBoot_update_trigger();
-    } else {
-        wolfBoot_success();
-    }
+        // wolfBoot_update_trigger();
 
+    wolfBoot_success();
     /* Blink 'version' times per second indefinitely */
     while (1) {
-        uint32_t blinks_per_second = version;
         uint32_t cycle_ms = 1000u / blinks_per_second;  /* full on+off time */
         uint32_t half_ms  = cycle_ms / 2u;              /* on or off time   */
 
