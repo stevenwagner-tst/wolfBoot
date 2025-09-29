@@ -26,6 +26,8 @@
  */
 
 #include <stdint.h>
+#include <stdarg.h>
+#include <stdio.h>
 
 #define UART2 (0x40004400)
 #define UART2_CR1      (*(volatile uint32_t *)(UART2 + 0x00))
@@ -72,8 +74,8 @@
 
 #define GPIO_MODE_AF (2)
 #define UART2_PIN_AF 4
-#define UART2_RX_PIN 2
-#define UART2_TX_PIN 3
+#define UART2_RX_PIN 3
+#define UART2_TX_PIN 2
 
 #define CPU_FREQ (24000000)
 
@@ -108,7 +110,7 @@ int uart_init(uint32_t bitrate, uint8_t data, char parity, uint8_t stop)
     UART2_CR1 &= (~UART_CR1_OVER8);
 
     /* Configure clock */
-    UART2_BRR |= (uint16_t)(CPU_FREQ / bitrate);
+    UART2_BRR = (uint16_t)(CPU_FREQ / bitrate);
 
     /* Configure data bits */
     if (data == 8)
@@ -131,7 +133,7 @@ int uart_init(uint32_t bitrate, uint8_t data, char parity, uint8_t stop)
     /* Set stop bits */
     reg = UART2_CR2 & ~UART_CR2_STOPBITS;
     if (stop > 1)
-        UART2_CR2 = reg & (2 << 12);
+        UART2_CR2 = reg | (2 << 12);
     else
         UART2_CR2 = reg;
     

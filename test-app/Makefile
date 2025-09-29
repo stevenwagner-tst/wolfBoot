@@ -30,7 +30,33 @@ endif
 
 CFLAGS+=-g -ggdb -Wall -Wstack-usage=1024 -ffreestanding -Wno-unused -DPLATFORM_$(TARGET) -I../include -nostartfiles
 
+<<<<<<< HEAD
 APP_OBJS:=app_$(TARGET).o led.o system.o timer.o ../src/libwolfboot.o
+=======
+
+ifeq ($(TARGET),ti_hercules)
+  APP_OBJS:=app_$(TARGET).o ../test-app/libwolfboot.o
+  CFLAGS+=-I"../include"
+else
+  CFLAGS+=-Wall -Wstack-usage=1024 -ffreestanding -Wno-unused -nostartfiles
+  CFLAGS+=-DTARGET_$(TARGET) -I../include
+  CFLAGS+=-g
+  ifeq ($(USE_GCC),1)
+    CFLAGS+=-ggdb3
+  else
+    CFLAGS+=-gstabs
+  endif
+
+  ifeq ($(ARCH),RENESAS_RX)
+    APP_OBJS:=app_renesas_rx.o ../test-app/libwolfboot.o ../src/boot_renesas.o ../src/boot_renesas_start.o ../hal/renesas-rx.o
+    LDFLAGS+=-ffreestanding -nostartfiles
+    CFLAGS+=-DWOLFBOOT_RENESAS_APP
+  else
+    APP_OBJS:=app_$(TARGET).o led.o system.o timer.o syscalls.o ../test-app/libwolfboot.o
+  endif
+endif
+
+>>>>>>> 3eede898 (this is working build for menu fucntionality + A/B slot choice)
 include ../arch.mk
 
 ifeq ($(TZEN),1)

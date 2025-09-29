@@ -87,8 +87,13 @@ tools/uart-flash-server/ufserver
 tools/unit-tests/unit-parser
 config/*.ld
 
-# Generated confiuguration file
-.config
+# Elf preprocessing tools
+tools/squashelf/**
+!tools/squashelf/squashelf.c
+!tools/squashelf/Makefile
+!tools/squashelf/README.md
+
+# Generated configuration files
 .vs
 *.filters
 *.user

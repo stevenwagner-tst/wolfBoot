@@ -28,6 +28,15 @@
 #include "spi_flash.h"
 #include "wolfboot/wolfboot.h"
 
+#include "menu.h"
+#include "delta.h"
+#include "printf.h"
+#ifdef WOLFBOOT_TPM
+#include "tpm.h"
+#endif
+#ifdef SECURE_PKCS11
+int WP11_Library_Init(void);
+#endif
 
 #ifdef RAM_CODE
 extern unsigned int _start_text;
@@ -40,10 +49,11 @@ static uint8_t buffer[FLASHBUFFER_SIZE];
 
 static void RAMFUNCTION wolfBoot_erase_bootloader(void)
 {
-    uint32_t *start = (uint32_t *)&_start_text;
-    uint32_t len = WOLFBOOT_PARTITION_BOOT_ADDRESS - (uint32_t)start;
-    hal_flash_erase((uint32_t)start, len);
+    uintptr_t flash_base = (uintptr_t)TO_ABS_ADDR(0); /* absolute base of flash */
+    uintptr_t boot_abs   = (uintptr_t)TO_ABS_ADDR(WOLFBOOT_PARTITION_BOOT_ADDRESS);
 
+    uint32_t len = (uint32_t)(boot_abs - flash_base);
+    hal_flash_erase(flash_base, len);
 }
 
 #include <string.h>
@@ -281,10 +291,209 @@ static int wolfBoot_update(int fallback_allowed)
     return 0;
 }
 
+#if defined(ARCH_SIM) && defined(WOLFBOOT_TPM) && defined(WOLFBOOT_TPM_SEAL)
+int wolfBoot_unlock_disk(void)
+{
+    int ret;
+    struct wolfBoot_image img;
+    uint8_t secret[WOLFBOOT_MAX_SEAL_SZ];
+    int     secretSz;
+    uint8_t* policy = NULL, *pubkey_hint = NULL;
+    uint16_t policySz = 0;
+    int      nvIndex = 0; /* where the sealed blob is stored in NV */
+
+    memset(secret, 0, sizeof(secret));
+
+    wolfBoot_printf("Unlocking disk...\n");
+
+    /* check policy */
+    ret = wolfBoot_open_image(&img, PART_BOOT);
+    if (ret == 0) {
+        ret = wolfBoot_get_header(&img, HDR_PUBKEY, &pubkey_hint);
+        ret = (ret  == WOLFBOOT_SHA_DIGEST_SIZE) ? 0 : -1;
+    }
+    if (ret == 0) {
+        ret = wolfBoot_get_policy(&img, &policy, &policySz);
+        if (ret == -TPM_RC_POLICY_FAIL) {
+            /* the image is not signed with a policy */
+            wolfBoot_printf("Image policy signature missing!\n");
+        }
+    }
+    if (ret == 0) {
+        /* try to unseal the secret */
+        ret = wolfBoot_unseal(pubkey_hint, policy, policySz, nvIndex,
+            secret, &secretSz);
+        if (ret != 0) { /* if secret does not exist, expect TPM_RC_HANDLE here */
+            if ((ret & RC_MAX_FMT1) == TPM_RC_HANDLE) {
+                wolfBoot_printf("Sealed secret does not exist!\n");
+            }
+            /* create secret to seal */
+            secretSz = 32;
+            ret = wolfBoot_get_random(secret, secretSz);
+            if (ret == 0) {
+                wolfBoot_printf("Creating new secret (%d bytes)\n", secretSz);
+                wolfBoot_print_hexstr(secret, secretSz, 0);
+
+                /* seal new secret */
+                ret = wolfBoot_seal(pubkey_hint, policy, policySz, nvIndex,
+                    secret, secretSz);
+            }
+            if (ret == 0) {
+                uint8_t secretCheck[WOLFBOOT_MAX_SEAL_SZ];
+                int     secretCheckSz = 0;
+
+                /* unseal again to make sure it works */
+                memset(secretCheck, 0, sizeof(secretCheck));
+                ret = wolfBoot_unseal(pubkey_hint, policy, policySz, nvIndex,
+                    secretCheck, &secretCheckSz);
+                if (ret == 0) {
+                    if (secretSz != secretCheckSz ||
+                        memcmp(secret, secretCheck, secretSz) != 0)
+                    {
+                        wolfBoot_printf("secret check mismatch!\n");
+                        ret = -1;
+                    }
+                }
+
+                wolfBoot_printf("Secret Check %d bytes\n", secretCheckSz);
+                wolfBoot_print_hexstr(secretCheck, secretCheckSz, 0);
+                TPM2_ForceZero(secretCheck, sizeof(secretCheck));
+            }
+        }
+    }
+
+    if (ret == 0) {
+        wolfBoot_printf("Secret %d bytes\n", secretSz);
+        wolfBoot_print_hexstr(secret, secretSz, 0);
+
+        /* TODO: Unlock disk */
+
+
+        /* Extend a PCR from the mask to prevent future unsealing */
+    #if !defined(ARCH_SIM) && !defined(WOLFBOOT_NO_UNSEAL_PCR_EXTEND)
+        {
+        uint32_t pcrMask;
+        uint32_t pcrArraySz;
+        uint8_t  pcrArray[1]; /* get one PCR from mask */
+        /* random value to extend the first PCR mask */
+        const uint8_t digest[WOLFBOOT_TPM_PCR_DIG_SZ] = {
+            0xEA, 0xA7, 0x5C, 0xF6, 0x91, 0x7C, 0x77, 0x91,
+            0xC5, 0x33, 0x16, 0x6D, 0x74, 0xFF, 0xCE, 0xCD,
+            0x27, 0xE3, 0x47, 0xF6, 0x82, 0x1D, 0x4B, 0xB1,
+            0x32, 0x70, 0x88, 0xFC, 0x69, 0xFF, 0x6C, 0x02,
+        };
+        memcpy(&pcrMask, policy, sizeof(pcrMask));
+        pcrArraySz = wolfBoot_tpm_pcrmask_sel(pcrMask,
+            pcrArray, sizeof(pcrArray)); /* get first PCR from mask */
+        wolfBoot_tpm2_extend(pcrArray[0], (uint8_t*)digest, __LINE__);
+        }
+    #endif
+    }
+    else {
+        wolfBoot_printf("unlock disk failed! %d (%s)\n",
+            ret, wolfTPM2_GetRCString(ret));
+    }
+
+    TPM2_ForceZero(secret, sizeof(secretSz));
+    return ret;
+}
+#endif
+
+extern volatile slot_choice_t g_menu_choice;   // defined in loader.c
+
+static int verify_image_ok(uint8_t part) {
+    struct wolfBoot_image img;
+    wolfBoot_printf("\r\nVerifying Valid image...");
+    if (wolfBoot_open_image(&img, part) != 0) 
+    {
+        wolfBoot_printf("Failed.");
+        return -1;
+    } else {
+        wolfBoot_printf("Passed!\r\n");
+    }
+    wolfBoot_printf("Verifying Image Integrity via hash...");
+    if (wolfBoot_verify_integrity(&img) != 0) 
+    {
+        wolfBoot_printf("Failed.");
+        return -1;
+    } else {
+        wolfBoot_printf("Passed!\r\n");
+    }
+    wolfBoot_printf("Verifying Valid Image Signature...");
+    if (wolfBoot_verify_authenticity(&img) != 0)
+    {
+        wolfBoot_printf("Failed.");
+        return -1;
+    } else {
+        wolfBoot_printf("Passed!\r\n");
+    }
+    return 0;
+}
+
 void RAMFUNCTION wolfBoot_start(void)
 {
-    uint8_t st;
-    struct wolfBoot_image boot, update;
+    int bootRet;
+    int updateRet;
+#ifndef DISABLE_BACKUP
+    int resumedFinalErase;
+#endif
+    uint8_t bootState;
+    uint8_t updateState;
+    struct wolfBoot_image boot;
+    /* ====== MENU OVERRIDE (runs before normal policy) ====== */
+
+    if (g_menu_choice == SLOT_B) {
+
+        /* Verify SLOT_B image before booting */
+        if (verify_image_ok(PART_UPDATE) == 0) {
+            wolfBoot_printf("Image in Slot B is valid. Booting...\n");
+
+            /* Auto-persist this as the new default */
+            persist_preferred_slot(SLOT_B);
+
+            struct wolfBoot_image imgB;
+            if (wolfBoot_open_image(&imgB, PART_UPDATE) == 0) {
+                hal_prepare_boot();                 /* sets VTOR, disables IRQs */
+                do_boot((void *)imgB.fw_base);      /* jump to Slot B */
+            }
+            wolfBoot_printf("ERROR: Failed to open Slot B image after verify.\n");
+            wolfBoot_panic();
+        } else {
+            wolfBoot_printf("Slot B image invalid, staying on Slot A.\n");
+            g_menu_choice = SLOT_A;  /* fall back */
+        }
+
+    } else if (g_menu_choice == SLOT_A) {
+
+        /* Verify SLOT_A image before booting */
+        if (verify_image_ok(PART_BOOT) == 0) {
+            wolfBoot_printf("Image in Slot A is valid. Booting...\n");
+
+            /* Auto-persist this as the new default */
+            persist_preferred_slot(SLOT_A);
+
+            /* Normal boot flow will continue to Slot A */
+        } else {
+            wolfBoot_printf("Slot A image invalid, trying Slot B instead...\n");
+
+            /* Try to boot B if available */
+            if (verify_image_ok(PART_UPDATE) == 0) {
+                struct wolfBoot_image imgB;
+                if (wolfBoot_open_image(&imgB, PART_UPDATE) == 0) {
+                    persist_preferred_slot(SLOT_B);
+                    hal_prepare_boot();
+                    do_boot((void *)imgB.fw_base);
+                }
+            }
+            wolfBoot_printf("Both slots invalid — panic!\n");
+            wolfBoot_panic();
+        }
+    }
+
+    /* ====== END MENU OVERRIDE ====== */
+#if defined(ARCH_SIM) && defined(WOLFBOOT_TPM) && defined(WOLFBOOT_TPM_SEAL)
+    wolfBoot_unlock_disk();
+#endif
 
 #ifdef RAM_CODE
     wolfBoot_check_self_update();
@@ -300,10 +509,19 @@ void RAMFUNCTION wolfBoot_start(void)
     } else if ((wolfBoot_get_partition_state(PART_UPDATE, &st) == 0) && (st == IMG_STATE_UPDATING)) {
         wolfBoot_update(0);
     }
-    if ((wolfBoot_open_image(&boot, PART_BOOT) < 0) ||
-            (wolfBoot_verify_integrity(&boot) < 0)  ||
-            (wolfBoot_verify_authenticity(&boot) < 0)) {
-        if (wolfBoot_update(1) < 0) {
+
+    bootRet = wolfBoot_open_image(&boot, PART_BOOT);
+    // wolfBoot_printf("Booting version: 0x%x\n",
+    //     wolfBoot_get_blob_version(boot.hdr));
+
+    if (bootRet < 0
+            || (wolfBoot_verify_integrity(&boot) < 0)
+            || (wolfBoot_verify_authenticity(&boot) < 0)
+    ) {
+        wolfBoot_printf("Boot failed: Hdr %d, Hash %d, Sig %d\n",
+            boot.hdr_ok, boot.sha_ok, boot.signature_ok);
+        wolfBoot_printf("Trying emergency update\n");
+        if (likely(wolfBoot_update(1) < 0)) {
             /* panic: no boot option available. */
             while(1)
                 ;

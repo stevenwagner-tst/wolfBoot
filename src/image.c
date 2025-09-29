@@ -34,6 +34,86 @@
 static WOLFTPM2_DEV wolftpm_dev;
 #endif /* WOLFBOOT_TPM */
 
+#ifndef PART_ADDR_ABSOLUTE
+#define PART_ADDR_ABSOLUTE 0
+#endif
+
+#if PART_ADDR_ABSOLUTE
+  #define TO_ABS_ADDR(off) ((uint8_t*)(uintptr_t)(off))
+#else
+  /* ARCH_FLASH_OFFSET must be set to the mem-mapped base, e.g. 0x08000000 */
+  #ifndef ARCH_FLASH_OFFSET
+  #error "ARCH_FLASH_OFFSET must be defined when PART_ADDR_ABSOLUTE=0"
+  #endif
+  #define TO_ABS_ADDR(off) ((uint8_t*)((uintptr_t)(off) + (uintptr_t)ARCH_FLASH_OFFSET))
+#endif
+
+/* Globals */
+static uint8_t digest[WOLFBOOT_SHA_DIGEST_SIZE] XALIGNED(4);
+
+#if defined(WOLFBOOT_CERT_CHAIN_VERIFY) && \
+    (defined(WOLFBOOT_ENABLE_WOLFHSM_CLIENT) || \
+     defined(WOLFBOOT_ENABLE_WOLFHSM_SERVER))
+static whKeyId g_certLeafKeyId  = WH_KEYID_ERASED;
+static int     g_leafKeyIdValid = 0;
+#endif
+
+/* TPM based verify */
+#if defined(WOLFBOOT_TPM) && defined(WOLFBOOT_TPM_VERIFY)
+#ifdef ECC_IMAGE_SIGNATURE_SIZE
+#define IMAGE_SIGNATURE_SIZE ECC_IMAGE_SIGNATURE_SIZE
+#else
+#define IMAGE_SIGNATURE_SIZE RSA_IMAGE_SIGNATURE_SIZE
+#endif
+
+static void wolfBoot_verify_signature_tpm(uint8_t key_slot,
+        struct wolfBoot_image *img, uint8_t *sig)
+{
+    int ret = 0, verify_res = 0;
+    WOLFTPM2_KEY tpmKey;
+    TPM_ALG_ID alg, sigAlg;
+    uint8_t *hdr;
+    uint16_t hdrSz;
+
+    /* Load public key into TPM */
+    memset(&tpmKey, 0, sizeof(tpmKey));
+
+    /* get public key for policy authorization */
+    hdrSz = wolfBoot_get_header(img, HDR_PUBKEY, &hdr);
+    if (hdrSz != WOLFBOOT_SHA_DIGEST_SIZE) {
+        ret = -1;
+    }
+    if (ret == 0) {
+        ret = wolfBoot_load_pubkey(hdr /* pubkey_hint */, &tpmKey, &alg);
+    }
+    if (ret == 0) {
+        sigAlg = (alg == TPM_ALG_RSA) ? TPM_ALG_RSASSA : TPM_ALG_ECDSA;
+        ret = wolfTPM2_VerifyHashScheme(&wolftpm_dev, &tpmKey,
+            sig, /* Signature */
+            IMAGE_SIGNATURE_SIZE, /* Signature size */
+            img->sha_hash, WOLFBOOT_SHA_DIGEST_SIZE, /* Hash */
+            sigAlg, WOLFBOOT_TPM_HASH_ALG);
+    }
+    /* unload handle regardless of result */
+    wolfTPM2_UnloadHandle(&wolftpm_dev, &tpmKey.handle);
+
+    if (ret == 0) {
+        verify_res = 1; /* TPM does hash verify compare */
+
+        if ((~(uint32_t)ret == 0xFFFFFFFF) && (verify_res == 1) &&
+            (~(uint32_t)verify_res == 0xFFFFFFFE)) {
+            wolfBoot_image_confirm_signature_ok(img);
+        }
+    }
+    else {
+        wolfBoot_printf("TPM verify signature error %d (%s)\n",
+            ret, wolfTPM2_GetRCString(ret));
+    }
+    (void)key_slot;
+}
+#else
+
+/* wolfCrypt software verify */
 #ifdef WOLFBOOT_SIGN_ED25519
 #include <wolfssl/wolfcrypt/ed25519.h>
 
@@ -533,24 +613,95 @@ static void key_sha3_384(uint8_t *hash)
 static int TPM2_IoCb(TPM2_CTX* ctx, const byte* txBuf, byte* rxBuf,
     word16 xferSz, void* userCtx)
 {
-    (void)userCtx;
-    (void)ctx;
-    word16 i;
-    spi_cs_on(SPI_CS_TPM);
-    memset(rxBuf, 0, xferSz);
-    for (i = 0; i < xferSz; i++)
-    {
-        spi_write(txBuf[i]);
-        rxBuf[i] = spi_read();
+#ifdef BIG_ENDIAN_ORDER
+    val = (((val & 0x000000FF) << 24) |
+           ((val & 0x0000FF00) <<  8) |
+           ((val & 0x00FF0000) >>  8) |
+           ((val & 0xFF000000) >> 24));
+#endif
+  return val;
+}
+
+/**
+ * @brief Get the size of the image from the image header.
+ *
+ * This function retrieves the size of the image from the image header.
+ *
+ * @param image The pointer to the image header.
+ * @return The size of the image in bytes.
+ */
+uint32_t wolfBoot_image_size(uint8_t *image)
+{
+    uint32_t *size = (uint32_t *)(image + sizeof (uint32_t));
+    return im2n(*size);
+}
+
+/**
+ * @brief Open an image using the provided image address.
+ *
+ * This function opens an image using the provided image address and initializes
+ * the wolfBoot_image structure.
+ *
+ * @param img The pointer to the wolfBoot_image structure to be initialized.
+ * @param image The pointer to the image address.
+ * @return 0 on success, -1 on error.
+ */
+int wolfBoot_open_image_address(struct wolfBoot_image *img, uint8_t *image)
+{
+    uint32_t *magic = (uint32_t *)(image);
+    if (*magic != WOLFBOOT_MAGIC) {
+    #ifndef WOLFBOOT_QUIET_IMAGE_LOG
+        wolfBoot_printf("Boot header magic 0x%08x invalid at %p\n",
+            (unsigned int)*magic, image);
+    #endif
+        uint32_t m = *magic;
+
+        /* Optional: quick hexdump of first 16 bytes */
+        const uint8_t *b = (const uint8_t*)image;
+        wolfBoot_printf("open_image_addr: part=%d is_ext=%d image=%p\n",
+                        img ? img->part : -1, img ? PART_IS_EXT(img) : -1, image);
+        wolfBoot_printf("Boot header magic 0x%08x invalid at %p\n",
+                        (unsigned int)m, image);
+        wolfBoot_printf("Expected WOLFBOOT_MAGIC = 0x%08x\n",
+                        (unsigned int)WOLFBOOT_MAGIC);
+        wolfBoot_printf("First 16 bytes @image: %02X %02X %02X %02X  %02X %02X %02X %02X  "
+                        "%02X %02X %02X %02X  %02X %02X %02X %02X\n",
+                        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+        return -1;
     }
-    spi_cs_off(SPI_CS_TPM);
-    /*
-    printf("\r\nSPI TX: ");
-    printbin(txBuf, xferSz);
-    printf("SPI RX: ");
-    printbin(rxBuf, xferSz);
-    printf("\r\n");
-    */
+    img->fw_size = wolfBoot_image_size(image);
+
+#ifdef WOLFBOOT_FIXED_PARTITIONS
+    if (img->fw_size > (WOLFBOOT_PARTITION_SIZE - IMAGE_HEADER_SIZE)) {
+        wolfBoot_printf("Image size %d > max %d\n",
+            (unsigned int)img->fw_size,
+            (WOLFBOOT_PARTITION_SIZE - IMAGE_HEADER_SIZE));
+        img->fw_size = WOLFBOOT_PARTITION_SIZE - IMAGE_HEADER_SIZE;
+        wolfBoot_printf("Failing at checkpoint 5\n");
+        return -1;
+    }
+    if (!img->hdr_ok) {
+        img->hdr = image;
+    }
+    img->trailer = img->hdr + WOLFBOOT_PARTITION_SIZE;
+#else
+    if (img->hdr == NULL) {
+        img->hdr = image;
+    }
+#endif
+    img->hdr_ok = 1;
+    img->fw_base = img->hdr + IMAGE_HEADER_SIZE;
+#ifdef EXT_FLASH
+    img->hdr_cache = image;
+#endif
+    #ifndef WOLFBOOT_QUIET_IMAGE_LOG
+    wolfBoot_printf("%s partition: %p (sz %d, ver 0x%x, type 0x%x)\n",
+        (img->part == PART_BOOT) ? "Boot" : "Update",
+        img->hdr, (unsigned int)img->fw_size,
+        wolfBoot_get_blob_version(image),
+        wolfBoot_get_blob_type(image));
+    #endif
     return 0;
 }
 
@@ -616,8 +767,10 @@ int wolfBoot_open_image(struct wolfBoot_image *img, uint8_t part)
     uint32_t *magic;
     uint32_t *size;
     uint8_t *image;
-    if (!img)
+    if (!img) {
+        wolfBoot_printf("Failing at checkpoint 1");
         return -1;
+    }
 
 #ifdef EXT_FLASH
     hdr_cpy_done = 0; /* reset hdr "open" flag */
@@ -634,14 +787,22 @@ int wolfBoot_open_image(struct wolfBoot_image *img, uint8_t part)
     }
 #ifdef MMU
     if (part == PART_DTS_BOOT || part == PART_DTS_UPDATE) {
-        img->hdr = (part == PART_DTS_BOOT) ? (void*)WOLFBOOT_DTS_BOOT_ADDRESS
-                                           : (void*)WOLFBOOT_DTS_UPDATE_ADDRESS;
-        if (PART_IS_EXT(img))
+        img->hdr = (part == PART_DTS_BOOT) ?
+            (void*)WOLFBOOT_DTS_BOOT_ADDRESS :
+            (void*)WOLFBOOT_DTS_UPDATE_ADDRESS;
+        wolfBoot_printf("%s partition: %p\n",
+            (part == PART_DTS_BOOT) ? "DTB boot" : "DTB update", img->hdr);
+        if (PART_IS_EXT(img)) {
+            wolfBoot_printf("PART is external??");
             image = fetch_hdr_cpy(img);
+        }
         else
             image = (uint8_t*)img->hdr;
-        if (*((uint32_t*)image) != UBOOT_FDT_MAGIC)
+        ret = wolfBoot_get_dts_size(image);
+        if (ret < 0) {
+            wolfBoot_printf("Failing at checkpoint 3");
             return -1;
+        }
         img->hdr_ok = 1;
         img->fw_base = img->hdr;
         /* DTS data is big endian */
@@ -654,10 +815,13 @@ int wolfBoot_open_image(struct wolfBoot_image *img, uint8_t part)
     }
 #endif
     if (part == PART_BOOT) {
-        img->hdr = (void*)WOLFBOOT_PARTITION_BOOT_ADDRESS;
-    } else if (part == PART_UPDATE) {
-        img->hdr = (void*)WOLFBOOT_PARTITION_UPDATE_ADDRESS;
-    } else
+        img->hdr = (void*)TO_ABS_ADDR(WOLFBOOT_PARTITION_BOOT_ADDRESS);
+    }
+    else if (part == PART_UPDATE) {
+        img->hdr = (void*)TO_ABS_ADDR(WOLFBOOT_PARTITION_UPDATE_ADDRESS);
+    }
+    else {
+        wolfBoot_printf("Failing at checkpoint 2");
         return -1;
 
     /* fetch header address

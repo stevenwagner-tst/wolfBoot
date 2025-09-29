@@ -25,6 +25,7 @@
 #include "spi_flash.h"
 #include "uart_flash.h"
 #include "wolfboot/wolfboot.h"
+#include "menu.h"
 
 #ifdef RAM_CODE
 extern unsigned int _start_text;
@@ -36,16 +37,41 @@ extern void (** const IV_RAM)(void);
 int main(void)
 {
     hal_init();
+    wolfBoot_printf("\r\nwolfBoot starting...\r\n");
+
+#ifdef TEST_FLASH
+    hal_flash_test();
+#endif
+#ifdef WOLFBOOT_ENABLE_WOLFHSM_CLIENT
+    if (0 != hal_hsm_init_connect()) {
+        wolfBoot_panic();
+    }
+#elif defined(WOLFBOOT_ENABLE_WOLFHSM_SERVER)
+    if (0 != hal_hsm_server_init()) {
+        wolfBoot_panic();
+    }
+#endif
     spi_flash_probe();
 #ifdef UART_FLASH
     uart_init(UART_FLASH_BITRATE, 8, 'N', 1);
+    // wolfBoot_printf("UART flash server ready @ %d\n", UART_FLASH_BITRATE);
     uart_send_current_version();
 #endif
+
+g_menu_choice = menu_preboot_run();
+
 #ifdef WOLFBOOT_TPM
     wolfBoot_tpm2_init();
 #endif
+#ifdef WOLFCRYPT_SECURE_MODE
+    wcs_Init();
+#endif
+    wolfBoot_printf("\r\nWolfBoot Bootloader starting...\r\n");
     wolfBoot_start();
-    while(1)
-        ;
+
+    /* wolfBoot_start should never return. */
+    wolfBoot_printf("wolfBoot_start returned! Panic.\n");
+    wolfBoot_panic();
+
     return 0;
 }

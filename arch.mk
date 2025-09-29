@@ -39,10 +39,14 @@ ifeq ($(ARCH),ARM)
   ifeq ($(TARGET),samr21)
     CORTEX_M0=1
   endif
-
+  ifeq ($(TARGET),imx_rt)
+    CORTEX_M7=1
+  endif
+  
   ifeq ($(TARGET),stm32l0)
     CORTEX_M0=1
     SPI_TARGET=stm32
+    ARCH_FLASH_OFFSET=0x08000000
   endif
 
   ifeq ($(TARGET),stm32g0)

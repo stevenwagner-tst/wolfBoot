@@ -12,7 +12,7 @@ WOLFBOOT_ROOT?=$(PWD)
 CFLAGS:=-D__WOLFBOOT -DWOLFBOOT_VERSION=$(WOLFBOOT_VERSION)UL -ffunction-sections -fdata-sections
 LSCRIPT:=config/target.ld
 LSCRIPT_FLAGS:=
-LDFLAGS:=
+LDFLAGS :=
 SECURE_LDFLAGS:=
 LD_START_GROUP:=-Wl,--start-group
 LD_END_GROUP:=-Wl,--end-group
@@ -30,11 +30,34 @@ FLASH_OTP_KEYSTORE?=0
 BOOTLOADER_PARTITION_SIZE?=$$(( $(WOLFBOOT_PARTITION_BOOT_ADDRESS) - $(ARCH_FLASH_OFFSET)))
 
 OBJS:= \
-./hal/$(TARGET).o \
-./src/loader.o \
-./src/string.o \
-./src/image.o \
-./src/libwolfboot.o
+	./src/string.o \
+	./src/image.o \
+	./src/libwolfboot.o \
+	./hal/hal.o \
+	./src/menu_stm32l0.o
+
+ifneq ($(filter 1,$(DEBUG_UART) $(UART_FLASH)),)
+  OBJS += src/uart_flash.o
+  OBJS += hal/uart/uart_drv_$(UART_TARGET).o
+  CFLAGS += -DUART_FLASH=$(UART_FLASH)
+  CFLAGS += -DUART_TARGET=$(UART_TARGET)
+endif
+
+ifneq ($(TARGET),library)
+	OBJS+=./hal/$(TARGET).o
+endif
+
+ifeq ($(SIGN),NONE)
+  PRIVATE_KEY=
+else
+  PRIVATE_KEY=wolfboot_signing_private_key.der
+  ifeq ($(FLASH_OTP_KEYSTORE),1)
+    OBJS+=./src/flash_otp_keystore.o
+  else
+    OBJS+=./src/keystore.o
+  endif
+endif
+
 WOLFCRYPT_OBJS:=
 PUBLIC_KEY_OBJS:=
 UPDATE_OBJS:=
@@ -126,6 +149,13 @@ test-app/image_v2_signed.bin: $(BOOT_IMG)
 		$(SECONDARY_PRIVATE_KEY) 2 || true
 	$(Q)(test $(SIGN) = NONE) && $(SIGN_ENV) $(SIGN_TOOL) $(SIGN_OPTIONS) \
 		$(BOOT_IMG) 2  || true
+
+test-app/image_v3_signed.bin: $(BOOT_IMG)
+	$(Q)(test $(SIGN) = NONE) || $(SIGN_ENV) $(SIGN_TOOL) $(SIGN_OPTIONS) \
+		$(SECONDARY_SIGN_OPTIONS) $(BOOT_IMG) $(PRIVATE_KEY) \
+		$(SECONDARY_PRIVATE_KEY) 3 || true
+	$(Q)(test $(SIGN) = NONE) && $(SIGN_ENV) $(SIGN_TOOL) $(SIGN_OPTIONS) \
+		$(BOOT_IMG) 3  || true
 
 test-app/image.elf: wolfboot.elf
 	$(Q)$(MAKE) -C test-app WOLFBOOT_ROOT="$(WOLFBOOT_ROOT)" image.elf
